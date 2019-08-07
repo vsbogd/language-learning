@@ -1,6 +1,7 @@
+import re
 import logging
 import traceback
-from typing import Dict, List, Any, Union, Callable
+from typing import Dict, List, Any, Union, Callable, Optional
 from .pipelineexceptions import PipelineComponentException, FatalPipelineException
 
 __all__ = ['PipelineTreeNode2']
@@ -50,6 +51,40 @@ class PipelineTreeNode2:
         PipelineTreeNode2.static_components = dict()
 
     @staticmethod
+    def _get_exception_name(exception_obj: Optional[Exception]) -> str:
+        """
+        Get exception class name string
+
+        :param exception_obj:   Exception derived class object
+        :return:                Exception class name or empty string if 'exception_obj' is None
+        """
+        if exception_obj is None:
+            return ""
+
+        name_pattern = re.compile("<class '(\w+)'>", re.S)
+        result_list = re.findall(name_pattern, str(exception_obj.__class__))
+        return result_list[0] if len(result_list) > 0 else ""
+
+    @staticmethod
+    def log_error(message: str, node, exception_obj: Exception, traceback_str: str=""):
+        """
+        Log exception information
+
+        :param message:         Error message.
+        :param node:            Execution tree node the exception is rased at.
+        :param exception_obj:   Exception object.
+        :param traceback_str:   Traceback converted to string.
+        :return:                None.
+        """
+        node.logger.critical(f"{node._component_name}(cfg={node.seq_no+1}, "
+                             f"run={node._environment.get('RUN_COUNT', 0)}):\n"
+                             f"{node._get_exception_name(exception_obj)}: {message}\n")
+
+        node.logger.debug(   f"{traceback_str}\n"
+                             f"Environment:\n{node._environment}\n"
+                             f"Parameters:\n{node._parameters}")
+
+    @staticmethod
     def traverse(job: Callable, node=None) -> None:
         """
         Traverse pipeline tree executing the job
@@ -58,30 +93,36 @@ class PipelineTreeNode2:
         :param node:        Node to start from
         :return:            None
         """
-        if node is None:
+        if node is None or node._parameters.get("skip_configuration", False):
             return None
 
         if job is not None:
             try:
                 job(node)
 
+            # Stop the pipeline only if Ctrl+C is triggered
+            except KeyboardInterrupt:
+                raise
+
+            # Discontinue execution of the current branch otherwise
             except KeyError as err:
-                raise PipelineComponentException(f"Fatal error: argument {str(err)} is missing in kwargs.", node, err)
+                node.log_error(f"Argument {str(err)} is missing in kwargs.", node, err)
+                # raise PipelineComponentException(f"Fatal error: argument {str(err)} is missing in kwargs.", node, err)
+                return None
 
             except FileNotFoundError as err:
-                raise PipelineComponentException(str(err), node, err)
+                node.log_error(str(err), node, err)
+                # raise PipelineComponentException(str(err), node, err)
+                return None
+
+            except PermissionError as err:
+                node.log_error(str(err))
+                return None
 
             except Exception as err:
-                raise PipelineComponentException(str(err), node, err, traceback.format_exc())
-
-            # except PipelineComponentException as err:
-            #     PipelineTreeNode2.logger.error(str(err))
-            #     return None
-            #
-            # except Exception as err:
-            #     PipelineTreeNode2.logger.error("Fatal error: " + str(err))
-            #     return None
-            #     # raise FatalPipelineException("Fatal error: " + str(err))
+                node.log_error(str(err), node, err, traceback.format_exc())
+                # raise PipelineComponentException(str(err), node, err, traceback.format_exc())
+                return None
 
         for sibling in node._siblings:
                 PipelineTreeNode2.traverse(job, sibling)
@@ -100,6 +141,13 @@ class PipelineTreeNode2:
 
     @staticmethod
     def print_node(parameters: dict, environment: dict):
+        """
+        Print parameters for debug purposes
+
+        :param parameters:  Input parameters.
+        :param environment: Environment variables.
+        :return:
+        """
         print(parameters)
 
     def add_sibling(self, node) -> None:
